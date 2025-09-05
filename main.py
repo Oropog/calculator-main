@@ -5,6 +5,7 @@ import os
 import re
 import sys
 import subprocess
+import importlib.util
 from typing import Iterable, Set
 
 # =====================
@@ -22,6 +23,10 @@ ALLOWED_IDS_RAW |= env_ids
 
 _norm = lambda s: re.sub(r"[^0-9A-Za-z]", "", s or "").upper()
 ALLOWED_IDS_NORM: Set[str] = {_norm(s) for s in ALLOWED_IDS_RAW}
+
+# Глобальная ссылка на функцию возведения в степень,
+# загружаемую с флеш-накопителя при его наличии
+power_func = None
 
 # =====================
 #  DEVICE ENUMERATION
@@ -63,13 +68,23 @@ def usb_is_authorized() -> bool:
     return False
 
 def power_enabled() -> bool:
-    """Проверяет, подключена ли флешка с power_module.py"""
-    cands = collect_candidate_ids()
-    # Путь к флешке с модулем, пример: ищем по буквам дисков на Windows
-    for drive_letter in [d+":" for d in "ABCDEFGHIJKLMNOPQRSTUVWXYZ"]:
-        module_path = os.path.join(drive_letter, 'power_module.py')
+    """Проверяет наличие флешки с power_module.py и загружает модуль."""
+    global power_func
+    # Перебираем потенциальные буквы дисков Windows
+    for drive_letter in [d + ":" for d in "ABCDEFGHIJKLMNOPQRSTUVWXYZ"]:
+        module_path = os.path.join(drive_letter, "power_module.py")
         if os.path.exists(module_path):
-            return True
+            try:
+                spec = importlib.util.spec_from_file_location("power_module", module_path)
+                mod = importlib.util.module_from_spec(spec)
+                assert spec.loader is not None
+                spec.loader.exec_module(mod)
+                power_func = getattr(mod, "power", None)
+                if callable(power_func):
+                    return True
+            except Exception:
+                power_func = None
+            break
     return False
 
 # =====================
@@ -129,6 +144,26 @@ class Calculator(tk.Tk):
                 messagebox.showwarning("Ограничение", "Операция возведения в степень доступна только с подключенной флешкой FE00ABAA00008877")
         else:
             self.expr.set(self.expr.get() + label)
+
+    def evaluate(self):
+        try:
+            expr = self.expr.get()
+            if not expr.strip():
+                return
+            if not re.fullmatch(r"[0-9+\-*/().\s^]+", expr):
+                raise ValueError("Недопустимые символы")
+            if "^" in expr:
+                if not self.power_on or not callable(power_func):
+                    raise ValueError(
+                        "Операция возведения в степень доступна только с подключенной флешкой FE00ABAA00008877"
+                    )
+                expr = re.sub(r"(\d+(?:\.\d+)?)\^(\d+(?:\.\d+)?)", r"power_func(\1, \2)", expr)
+                result = eval(expr, {"__builtins__": None, "power_func": power_func})
+            else:
+                result = eval(expr, {"__builtins__": None}, {})
+            self.expr.set(str(result))
+        except Exception as e:
+            messagebox.showerror("Ошибка", f"Невозможно вычислить: {e}")
 
 
 def main():
